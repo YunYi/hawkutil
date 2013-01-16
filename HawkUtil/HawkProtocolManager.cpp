@@ -1,0 +1,168 @@
+#include "HawkProtocolManager.h"
+#include "HawkLoggerManager.h"
+#include "HawkOSOperator.h"
+#include "HawkSysProtocol.h"
+
+namespace Hawk
+{
+	HAKW_SINGLETON_IMPL(ProtocolManager);
+
+	HawkProtocolManager::Scope::Scope(HawkProtocol* pProto) : m_pProto(pProto) 
+	{
+	};
+
+	HawkProtocolManager::Scope::~Scope() 
+	{ 
+		HawkProtocolManager::GetInstance()->ReleaseProto(m_pProto); 
+	}
+
+	HawkProtocolManager::HawkProtocolManager()
+	{
+		m_bAutoDecode = true;
+		m_iProtoSize  = sizeof(ProtoType) + sizeof(ProtoSize) + sizeof(ProtoCrc);		
+	}
+
+	HawkProtocolManager::~HawkProtocolManager()
+	{		
+		ProtocolMap::iterator it = m_mRegister.begin();
+		for (;it!=m_mRegister.end();++it)
+		{
+			HAWK_RELEASE(it->second);
+		}
+		m_mRegister.clear();
+	}	
+
+	Bool HawkProtocolManager::RegSysProtocol()
+	{
+		//注册系统内部协议
+		REGISTER_PROTO(SysProtocol::Sys_HeartBeat);
+		REGISTER_PROTO(SysProtocol::Sys_HeartBreak);
+		REGISTER_PROTO(SysProtocol::Sys_SessionBreak);
+		REGISTER_PROTO(SysProtocol::Sys_CloseSession);
+		REGISTER_PROTO(SysProtocol::Sys_LogMsg);
+		REGISTER_PROTO(SysProtocol::Sys_ProfReq);
+		REGISTER_PROTO(SysProtocol::Sys_ProfInfo);
+		REGISTER_PROTO(SysProtocol::Sys_RefuseConn);
+		REGISTER_PROTO(SysProtocol::Sys_CltPing);
+		REGISTER_PROTO(SysProtocol::Sys_SvrPong);
+
+		return true;
+	}
+
+	Bool HawkProtocolManager::CheckDecodeProtocol(const HawkOctetsStream& xOS, UInt32* pBodySize)
+	{
+		if (xOS.AvailableSize() >= m_iProtoSize)
+		{
+			ProtoSize iSize = *((ProtoSize*)((Char*)xOS.AvailableData() + sizeof(ProtoType)));
+			if (xOS.AvailableSize() >= m_iProtoSize + iSize)
+			{
+				if (pBodySize)
+					*pBodySize = m_iProtoSize + iSize;
+
+				return true;
+			}
+		}
+		return false;
+	}
+
+	UInt32 HawkProtocolManager::GetProtoHeaderSize() const
+	{
+		return m_iProtoSize;
+	}
+
+	Bool HawkProtocolManager::ReadProtocolHeader(HawkOctetsStream& xOS, ProtoType& iType, ProtoSize& iSize, ProtoCrc& iCrc)
+	{
+		xOS.Pop(iType);
+		xOS.Pop(iSize);
+		xOS.Pop(iCrc);
+		return true;
+	}
+
+	Bool HawkProtocolManager::WriteProtocolHeader(HawkOctetsStream& xOS, ProtoType iType, ProtoSize iSize, ProtoCrc iCrc)
+	{
+		xOS.Push(iType);
+		xOS.Push(iSize);
+		xOS.Push(iCrc);
+		return true;
+	}
+
+	HawkProtocol*  HawkProtocolManager::Decode(HawkOctetsStream& rhsOS)
+	{
+		if (!CheckDecodeProtocol(rhsOS))
+			return 0;
+
+		//创建协议,开始解析
+		ProtoType iType	= *((ProtoType*)rhsOS.AvailableData());
+		Protocol* pProto = CreateProtocol(iType);
+		if (pProto && !pProto->Decode(rhsOS))
+		{
+			ReleaseProto(pProto);
+		}
+		return pProto;
+	}
+
+	Bool HawkProtocolManager::Register(ProtoType iType, HawkProtocol* pProto)
+	{		
+		ProtocolMap::iterator it = m_mRegister.find(iType);
+		HawkAssert(it == m_mRegister.end());
+		if (pProto && it == m_mRegister.end())
+		{
+			pProto->AddRef();
+			m_mRegister[iType] = pProto;	
+			return true;
+		}
+		return false;
+	}
+
+	Bool HawkProtocolManager::CheckProtocolLegal(ProtoType iType)
+	{
+		return m_mRegister.find(iType) != m_mRegister.end();
+	}
+
+	UInt32 HawkProtocolManager::GetRegProtoIds(vector<ProtoType>& vProtoIds)
+	{
+		vProtoIds.clear();
+
+		ProtocolMap::iterator it = m_mRegister.begin();
+		for (;it!=m_mRegister.end();it++)
+		{
+			vProtoIds.push_back(it->first);
+		}
+
+		return (UInt32)vProtoIds.size();
+	}
+
+	Bool  HawkProtocolManager::IsAutoDecode() const
+	{
+		return m_bAutoDecode;
+	}
+
+	void  HawkProtocolManager::SetAutoDecode(Bool bAuto)
+	{
+		m_bAutoDecode = bAuto;
+	}
+
+	HawkProtocol*  HawkProtocolManager::CreateProtocol(ProtoType iType)
+	{
+		ProtocolMap::iterator it = m_mRegister.find(iType);
+		if (it == m_mRegister.end())
+		{
+			HawkFmtError("Protocol Unregister, Type: %d", iType);
+			T_Exception("Protocol Unregister.");
+			return 0;
+		}
+
+		HawkProtocol* pProto = m_mRegister[iType]->Clone();
+		return pProto;
+	}
+
+	Bool HawkProtocolManager::ReleaseProto(HawkProtocol*& pProto)
+	{
+		if (pProto)
+		{
+			HAWK_RELEASE(pProto);
+			return true;
+		}
+		return false;
+	}
+}
